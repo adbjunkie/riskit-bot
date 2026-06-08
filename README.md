@@ -14,8 +14,9 @@ This is the clean v1 implementation. Perfect base before adding AI enhancement, 
 - `/start` shows rules + clear instructions
 - Send **one or many photos** (individually or as album) **or** leak email / phone / Instagram
 - Always-visible persistent menu buttons (Leak Photo / Email / Phone / Instagram + Rules + Cancel) — commands still work too
-- Clear welcome message explaining what the bot is and that leaks are posted anonymously to the target group/channel
-- Batch confirmation for photos; simple confirmation for text leaks
+- Clear welcome message explaining what the bot is and that leaks are posted anonymously to the target private group/channel (with direct invite link shown)
+- Batch confirmation for photos and text leaks always include the exact private destination link so users know precisely where their content goes
+- The bot dynamically shows the real group/channel name + the provided invite link in welcome, confirmations, success, rules, and errors
 - Truly anonymous: bot posts from its own account (no user info or forwarding)
 - Each photo gets individual reactions; rate limiting counts batches and text leaks toward daily total.
 - Clean, minimal, easy to extend
@@ -76,6 +77,7 @@ In your Railway project → your service → **Variables** tab, add:
 |-------------------------|----------|----------------------------------|-------|
 | `TELEGRAM_BOT_TOKEN`    | Yes      | `123456:ABCdef...`               | From @BotFather |
 | `GROUP_CHAT_ID`         | Yes      | `-1001234567890`                 | Group or Channel ID (see below) |
+| `TARGET_INVITE_LINK`    | Yes (for user visibility) | `https://t.me/+_p1BLwT_gDY3N2M1` | Permanent invite link to the private destination. The bot shows this link in welcome, confirmations, success messages, and rules so users always know exactly where their leaks (photos + info) are posted. |
 | `ADMIN_USER_ID`         | No       | `5815775162`                     | Your user ID from @userinfobot |
 | `COOLDOWN_SECONDS`      | No       | `300`                            | 5 minutes default |
 | `DAILY_LIMIT`           | No       | `10`                             | Posts per user per day |
@@ -86,6 +88,10 @@ In your Railway project → your service → **Variables** tab, add:
 - Send any message there
 - Forward that message to [@userinfobot](https://t.me/userinfobot) or visit:
   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
+
+**Invite link (`TARGET_INVITE_LINK`)**:
+- Create a permanent invite link for the group/channel (even if private).
+- Paste it in `bot.py` (or set as env var) so the bot can show users exactly where their leaks are posted.
 
 ### 5. Persistent Storage (Rate Limits) on Railway
 
@@ -135,9 +141,10 @@ docker compose logs -f
 2. Choose leak type from the persistent bottom menu:
    - 📸 Leak Photo → send photos (batch supported)
    - 📧 Leak Email / 📱 Leak Phone / 📷 Leak Instagram → send the info as text
-3. Bot asks for confirmation (with clear warning that it will be posted anonymously to the target group/channel)
+3. Bot asks for confirmation (shows the real group name + direct private invite link)
 4. Confirm once → bot posts it anonymously (photos individually, text as labeled messages)
 5. Keyboard stays visible for next leak
+6. Users always see exactly where their leaks (photos + personal info) are going via the provided t.me link
 
 Everything is posted from the **bot account** — no trace to the sender. Rate limits apply per item / per photo in batch.
 

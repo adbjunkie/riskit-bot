@@ -63,6 +63,11 @@ def _get_int_env(name: str, default: int | None = None) -> int:
 TELEGRAM_BOT_TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
 GROUP_CHAT_ID = _get_int_env("GROUP_CHAT_ID")
 
+# Public invite link to the private group/channel where all leaks are posted.
+# This is shown to users so they know exactly where their submissions go.
+# Can be overridden via env var TARGET_INVITE_LINK.
+TARGET_INVITE_LINK = os.getenv("TARGET_INVITE_LINK", "https://t.me/+_p1BLwT_gDY3N2M1")
+
 # Optional
 ADMIN_USER_ID = _get_int_env("ADMIN_USER_ID", 0) or None
 
@@ -109,6 +114,11 @@ async def get_leak_target_name(bot) -> str:
             logger.warning(f"Could not fetch target chat title: {e}")
             TARGET_CHAT_TITLE = "the target group/channel"
     return TARGET_CHAT_TITLE
+
+
+def get_leak_destination_link() -> str:
+    """Returns an HTML link to the private group/channel where leaks are posted."""
+    return f'<a href="{TARGET_INVITE_LINK}">this private group</a>'
 
 
 # ==================== LOGGING ====================
@@ -218,7 +228,7 @@ RULES_TEXT = """⚠️ <b>RISK IT — Anonymous Leak Bot</b>
 RiskIt lets you anonymously leak photos + personal info (email, phone, Instagram) to the target group/channel.
 
 <b>Where leaks go:</b>
-After you confirm, the bot posts them from its own account into the configured group/channel (the bot will tell you the exact name when you start). 
+After you confirm, the bot posts them from its own account into the configured group/channel (the bot will tell you the exact name and link when you start). 
 No one sees your username or that it came from you.
 
 <b>Basic Rules:</b>
@@ -236,7 +246,7 @@ POST_INSTRUCTIONS = (
     "Use the buttons at the bottom to start a leak.\n\n"
     "📸 Leak Photo → send one or more photos (batch supported)\n"
     "📧 Leak Email / 📱 Leak Phone / 📷 Leak Instagram → send the info as text\n\n"
-    "You will always get a clear confirmation (the bot will name the exact destination) before anything is posted anonymously."
+    "You will always get a clear confirmation (including the exact private group link) before anything is posted anonymously."
 )
 
 
@@ -247,6 +257,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     target_name = await get_leak_target_name(context.bot)
+    dest_link = get_leak_destination_link()
     welcome = (
         "🔥 <b>Welcome to RiskIt Bot</b> — the anonymous leak bot.\n\n"
         "This is a private tool for <b>anonymous leaks</b>.\n"
@@ -256,7 +267,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Instagram accounts\n\n"
         f"<b>Where do the leaks go?</b>\n"
         f"Everything you confirm is posted <b>anonymously</b> from the bot account "
-        f"(no username, no trace back to you) into <b>{target_name}</b>.\n\n"
+        f"(no username, no trace back to you) into <b>{target_name}</b> — {dest_link}.\n\n"
         "Use the buttons below to choose what you want to leak. "
         "You will always get a confirmation before anything is posted."
     )
@@ -268,7 +279,8 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type != "private":
         return
     target_name = await get_leak_target_name(context.bot)
-    # Inject the real name into the rules text
+    dest_link = get_leak_destination_link()
+    # Inject the real name and link into the rules text
     rules_text = RULES_TEXT.replace(
         "the target group/channel", target_name
     ).replace(
@@ -276,6 +288,9 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ).replace(
         "the target chat", target_name
     )
+    # Always append the private invite link
+    if "Join here:" not in rules_text:
+        rules_text = rules_text.rstrip() + f"\n\nJoin the private destination here: {dest_link} (invite-only)."
     await update.message.reply_text(rules_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 
@@ -350,10 +365,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     target_name = await get_leak_target_name(context.bot)
+    dest_link = get_leak_destination_link()
     summary_text = (
         f"📸 <b>{current_count} photo{'s' if current_count != 1 else ''} in your batch.</b>\n\n"
         "Do you want to post <b>all of them anonymously</b>?\n\n"
-        f"⚠️ They will be posted from the bot into <b>{target_name}</b> (no trace to you).\n\n"
+        f"⚠️ They will be posted from the bot into <b>{target_name}</b> ({dest_link}).\n\n"
         "• Keep sending more photos to add them\n"
         "• Each photo gets its own reactions"
     )
@@ -485,7 +501,8 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                     success = f"✅ Posted {posted} photo(s) anonymously.\n⚠️ {errors} failed to post."
                 else:
                     target_name = await get_leak_target_name(context.bot)
-                    success = f"✅ Posted {posted} photo{'s' if posted != 1 else ''} anonymously to <b>{target_name}</b>!\n\nThank you. Use the buttons below for more leaks."
+                    dest_link = get_leak_destination_link()
+                    success = f"✅ Posted {posted} photo{'s' if posted != 1 else ''} anonymously to <b>{target_name}</b> ({dest_link})!\n\nThank you. Use the buttons below for more leaks."
 
                 try:
                     await query.edit_message_caption(success, reply_markup=None)
@@ -498,8 +515,9 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.error(f"Failed during batch post for user {user_id}: {e}")
                 pending_confirmations.pop(user_id, None)
                 target_name = await get_leak_target_name(context.bot)
+                dest_link = get_leak_destination_link()
                 error_text = (
-                    f"❌ Failed to post the batch to {target_name}.\n"
+                    f"❌ Failed to post the batch to {target_name} ({dest_link}).\n"
                     "Make sure the bot is an admin in the target chat with 'Post Messages' permission."
                 )
                 try:
@@ -533,7 +551,8 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
             pending_confirmations.pop(user_id, None)
 
             target_name = await get_leak_target_name(context.bot)
-            success = f"✅ Leaked anonymously to <b>{target_name}</b>!\n\nThank you."
+            dest_link = get_leak_destination_link()
+            success = f"✅ Leaked anonymously to <b>{target_name}</b> ({dest_link})!\n\nThank you."
             try:
                 await query.edit_message_text(success, reply_markup=None)
             except Exception:
@@ -545,8 +564,9 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Failed to post {leak_type} leak for user {user_id}: {e}")
             pending_confirmations.pop(user_id, None)
             target_name = await get_leak_target_name(context.bot)
+            dest_link = get_leak_destination_link()
             error_text = (
-                f"❌ Failed to post the leak to {target_name}.\n"
+                f"❌ Failed to post the leak to {target_name} ({dest_link}).\n"
                 "Make sure the bot is an admin in the target chat with 'Post Messages' permission."
             )
             try:
@@ -568,7 +588,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(
             "📸 <b>Photo leak mode</b>\n\n"
             "Send one or more photos (you can send them individually or as an album).\n"
-            "I'll show a live count and ask for confirmation before posting them anonymously (the bot will tell you the exact destination).",
+            "I'll show a live count and ask for confirmation (with the private group link) before posting them anonymously.",
             parse_mode="HTML",
             reply_markup=get_main_keyboard(),
         )
@@ -641,11 +661,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             leak_type = pending["type"]
             emoji = {"email": "📧", "phone": "📱", "instagram": "📷"}[leak_type]
             target_name = await get_leak_target_name(context.bot)
+            dest_link = get_leak_destination_link()
 
             confirm_text = (
                 f"{emoji} <b>Confirm leaking this {leak_type}</b> anonymously?\n\n"
                 f"<code>{value}</code>\n\n"
-                f"⚠️ Once confirmed, this will be posted from the bot into <b>{target_name}</b>. "
+                f"⚠️ Once confirmed, this will be posted from the bot into <b>{target_name}</b> ({dest_link}). "
                 "No one will know it came from you.\n\n"
                 "Are you sure you want to leak it?"
             )
@@ -673,7 +694,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Default / unknown text
     await update.message.reply_text(
         "Use the menu buttons at the bottom to leak something, or send a photo directly.\n"
-        "The bot will always tell you the exact destination in confirmations.\n"
+        "The bot will always show you the private group link in confirmations.\n"
         "Tap 📜 Rules for more info.",
         reply_markup=get_main_keyboard(),
     )
