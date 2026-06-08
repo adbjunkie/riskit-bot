@@ -2,7 +2,7 @@
 
 **Anonymous photo sharing bot for Telegram.**
 
-Users send a photo privately to the bot → confirm with one tap → the bot posts it **anonymously** into your Telegram supergroup (no username visible, post comes from the bot).
+Users send **one or more photos** privately → confirm the batch with one tap → the bot posts them **anonymously** into your Telegram group or channel (no username visible, posts come from the bot).
 
 This is the clean v1 implementation. Perfect base before adding AI enhancement, battles, vault, etc.
 
@@ -12,24 +12,27 @@ This is the clean v1 implementation. Perfect base before adding AI enhancement, 
 
 - Works only in **private chat** with the bot
 - `/start` shows rules + clear instructions
-- Supports photo + optional short caption
-- Confirmation step with inline buttons (✅ Yes, Post it / ❌ Cancel) + photo preview
-- Truly anonymous: `send_photo` from the bot account (no forward, no user attribution)
-- Built-in rate limiting (cooldown + daily limit) with persistent storage
+- Send **one or many photos** at once (individually or as an album)
+- Batch confirmation showing the total count with one "Post All (N)" button
+- Truly anonymous: each photo is sent via `send_photo` from the bot (no forward, no user attribution)
+- Each photo in a batch is posted separately so every image gets its own reactions and views
+- Built-in rate limiting (cooldown + daily limit). Batch posts count toward your daily total.
 - Clean, minimal, easy to extend
 
 ---
 
-## Important: Group Setup
+## Important: Target Chat Setup
 
 Before deploying the bot:
 
-1. Create a **Supergroup**
-2. Add the bot as **Administrator**
+1. Create a **Supergroup** or a **Channel**
+2. Add the bot as **Administrator** in that chat
 3. Enable **Post Messages** permission (required)
 4. (Optional but recommended) Enable **Delete Messages**
-5. Go to group settings → **Reactions** → turn reactions on
-6. Pin the rules in the group
+5. Go to chat settings → **Reactions** → turn reactions on
+6. Pin the rules (in groups) or post them as a pinned message (in channels)
+
+**Tip:** Many people prefer a **Channel** (with an optional linked Discussion Group for comments) for a cleaner photo feed experience. The bot works with both.
 
 ---
 
@@ -71,15 +74,15 @@ In your Railway project → your service → **Variables** tab, add:
 | Variable                | Required | Example                          | Notes |
 |-------------------------|----------|----------------------------------|-------|
 | `TELEGRAM_BOT_TOKEN`    | Yes      | `123456:ABCdef...`               | From @BotFather |
-| `GROUP_CHAT_ID`         | Yes      | `-1001234567890`                 | Supergroup ID (see below) |
+| `GROUP_CHAT_ID`         | Yes      | `-1001234567890`                 | Group or Channel ID (see below) |
 | `ADMIN_USER_ID`         | No       | `5815775162`                     | Your user ID from @userinfobot |
 | `COOLDOWN_SECONDS`      | No       | `300`                            | 5 minutes default |
 | `DAILY_LIMIT`           | No       | `10`                             | Posts per user per day |
 | `DATA_DIR`              | No       | `/app/data`                      | Important for persistence |
 
 **How to get `GROUP_CHAT_ID`**:
-- Temporarily add the bot to your supergroup
-- Send any message in the group
+- Add the bot to your target **supergroup** or **channel** as admin
+- Send any message there
 - Forward that message to [@userinfobot](https://t.me/userinfobot) or visit:
   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
 
@@ -125,16 +128,17 @@ docker compose logs -f
 
 ---
 
-## How the Flow Works
+## How the Flow Works (Multi-Photo Batches)
 
-1. User sends `/start` → sees rules + "send a photo"
-2. User sends a **photo** (can include a caption)
-3. Bot shows the photo back + confirmation buttons
-4. User taps **✅ Yes, Post it**
-5. Bot calls `send_photo(GROUP_CHAT_ID, ...)` — appears from the bot account
-6. User gets success message in private chat
+1. User sends `/start` → sees rules + instructions
+2. User sends **one or more photos** (individually or as a Telegram album)
+3. Bot shows/updates a confirmation: "📸 **N photos** in your batch." with ✅ Post All (N) | ❌ Cancel All
+4. User can keep adding photos — the confirmation message count updates live
+5. User taps **Post All (N)**
+6. Bot calls `send_photo(...)` for each photo in the batch (they appear from the bot account, individually)
+7. User gets "✅ Posted N photos anonymously!"
 
-Everything after the confirmation happens from the **bot**, so the original sender stays anonymous.
+Everything after the confirmation happens from the **bot**, so the original sender stays anonymous. Each photo gets its own reactions.
 
 ---
 
