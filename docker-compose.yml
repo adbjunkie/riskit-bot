@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  riskitbot:
+    build: .
+    container_name: riskitbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Local development persistence. On Railway use a Volume instead.
+      - ./data:/app/data
+    environment:
+      - TZ=UTC
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
