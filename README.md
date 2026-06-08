@@ -12,11 +12,12 @@ This is the clean v1 implementation. Perfect base before adding AI enhancement, 
 
 - Works only in **private chat** with the bot
 - `/start` shows rules + clear instructions
-- Send **one or many photos** at once (individually or as an album)
-- Batch confirmation showing the total count with one "Post All (N)" button
-- Truly anonymous: each photo is sent via `send_photo` from the bot (no forward, no user attribution)
-- Each photo in a batch is posted separately so every image gets its own reactions and views
-- Built-in rate limiting (cooldown + daily limit). Batch posts count toward your daily total.
+- Send **one or many photos** (individually or as album) **or** leak email / phone / Instagram
+- Always-visible persistent menu buttons (Leak Photo / Email / Phone / Instagram + Rules + Cancel) — commands still work too
+- Clear welcome message explaining what the bot is and that leaks are posted anonymously to the target group/channel
+- Batch confirmation for photos; simple confirmation for text leaks
+- Truly anonymous: bot posts from its own account (no user info or forwarding)
+- Each photo gets individual reactions; rate limiting counts batches and text leaks toward daily total.
 - Clean, minimal, easy to extend
 
 ---
@@ -128,17 +129,17 @@ docker compose logs -f
 
 ---
 
-## How the Flow Works (Multi-Photo Batches)
+## How the Flow Works
 
-1. User sends `/start` → sees rules + instructions
-2. User sends **one or more photos** (individually or as a Telegram album)
-3. Bot shows/updates a confirmation: "📸 **N photos** in your batch." with ✅ Post All (N) | ❌ Cancel All
-4. User can keep adding photos — the confirmation message count updates live
-5. User taps **Post All (N)**
-6. Bot calls `send_photo(...)` for each photo in the batch (they appear from the bot account, individually)
-7. User gets "✅ Posted N photos anonymously!"
+1. User sends `/start` (or taps a menu button) → sees explanation of the bot + where leaks go + always-visible buttons
+2. Choose leak type from the persistent bottom menu:
+   - 📸 Leak Photo → send photos (batch supported)
+   - 📧 Leak Email / 📱 Leak Phone / 📷 Leak Instagram → send the info as text
+3. Bot asks for confirmation (with clear warning that it will be posted anonymously to the target group/channel)
+4. Confirm once → bot posts it anonymously (photos individually, text as labeled messages)
+5. Keyboard stays visible for next leak
 
-Everything after the confirmation happens from the **bot**, so the original sender stays anonymous. Each photo gets its own reactions.
+Everything is posted from the **bot account** — no trace to the sender. Rate limits apply per item / per photo in batch.
 
 ---
 

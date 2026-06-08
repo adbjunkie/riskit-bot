@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -74,6 +74,20 @@ DAILY_LIMIT = _get_int_env("DAILY_LIMIT", 10)
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 RATE_LIMITS_FILE = os.path.join(DATA_DIR, "rate_limits.json")
+
+
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Always-visible persistent menu buttons."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📸 Leak Photo"), KeyboardButton("📧 Leak Email")],
+            [KeyboardButton("📱 Leak Phone"), KeyboardButton("📷 Leak Instagram")],
+            [KeyboardButton("📜 Rules"), KeyboardButton("❌ Cancel")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -176,22 +190,31 @@ def record_post(user_id: int) -> None:
 
 # ==================== TEXTS ====================
 
-RULES_TEXT = """⚠️ <b>RISK IT — Anonymous Photo Sharing</b>
+RULES_TEXT = """⚠️ <b>RISK IT — Anonymous Leak Bot</b>
+
+<b>What this bot is:</b>
+RiskIt lets you anonymously leak photos + personal info (email, phone, Instagram) to the target group/channel.
+
+<b>Where leaks go:</b>
+After you confirm, the bot posts them from its own account into the configured group/channel. 
+No one sees your username or that it came from you.
 
 <b>Basic Rules:</b>
-• Only post <b>your own</b> photos (no reposts, no stolen content)
-• No underage, illegal, revenge, or non-consensual material
-• No spam, extreme gore, or hate speech
-• Once posted, the photo is visible to everyone in the group
-• Be respectful — the group has moderators
+• Only leak <b>your own</b> real info and photos (no stolen / fake / revenge content)
+• No underage, illegal, or non-consensual material
+• No spam, extreme gore, or hate
+• Once posted, it's visible to everyone in the target chat forever (or until deleted by admins)
+• Be respectful — moderators can remove content
 
-This is a <b>basic version</b>. More features (AI, battles, etc.) coming later.
+This is the basic version. Use the menu buttons below.
 
-Send a photo in this private chat to continue."""
+Choose an option from the keyboard to start leaking."""
 
 POST_INSTRUCTIONS = (
-    "📸 Send one or more photos (each can have its own short caption).\n\n"
-    "You will get a confirmation showing the total count. Tap to post the whole batch anonymously."
+    "Use the buttons at the bottom to start a leak.\n\n"
+    "📸 Leak Photo → send one or more photos (batch supported)\n"
+    "📧 Leak Email / 📱 Leak Phone / 📷 Leak Instagram → send the info as text\n\n"
+    "You will always get a clear confirmation before anything is posted anonymously to the group."
 )
 
 
@@ -200,14 +223,28 @@ POST_INSTRUCTIONS = (
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type != "private":
         return
-    await update.message.reply_text(RULES_TEXT, parse_mode="HTML")
-    await update.message.reply_text(POST_INSTRUCTIONS)
+
+    welcome = (
+        "🔥 <b>Welcome to RiskIt Bot</b> — the anonymous leak bot.\n\n"
+        "This is a private tool for <b>anonymous leaks</b>.\n"
+        "• Photos (with optional captions)\n"
+        "• Emails\n"
+        "• Phone numbers\n"
+        "• Instagram accounts\n\n"
+        "<b>Where do the leaks go?</b>\n"
+        "Everything you confirm is posted <b>anonymously</b> from the bot account "
+        "(no username, no trace back to you) into the target group/channel.\n\n"
+        "Use the buttons below to choose what you want to leak. "
+        "You will always get a confirmation before anything is posted."
+    )
+    await update.message.reply_text(welcome, parse_mode="HTML", reply_markup=get_main_keyboard())
+    await update.message.reply_text(POST_INSTRUCTIONS, reply_markup=get_main_keyboard())
 
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type != "private":
         return
-    await update.message.reply_text(RULES_TEXT, parse_mode="HTML")
+    await update.message.reply_text(RULES_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -216,11 +253,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     batch = pending_confirmations.pop(user_id, None)
     if batch:
-        count = len(batch.get("photos", []))
-        msg = f"❌ Batch of {count} photo{'s' if count != 1 else ''} cleared."
-        await update.message.reply_text(msg)
+        count = len(batch.get("photos", [])) or (1 if batch.get("value") else 0)
+        msg = f"❌ Pending leak cleared ({count} item{'s' if count != 1 else ''})."
     else:
-        await update.message.reply_text("No pending photos to cancel.")
+        msg = "No pending leak to cancel."
+    await update.message.reply_text(msg, reply_markup=get_main_keyboard())
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -230,6 +267,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     user_id = update.effective_user.id
+
+    # Prevent mixing text leaks with photos
+    if user_id in pending_confirmations:
+        existing = pending_confirmations[user_id]
+        if existing.get("type") != "photo":
+            await update.message.reply_text(
+                "You have a pending text leak (email/phone/IG). Finish it or tap ❌ Cancel first, then send photos.",
+                reply_markup=get_main_keyboard()
+            )
+            return
+        # else it's an existing photo batch — allow adding more
+
     photo = update.message.photo[-1]
     file_id = photo.file_id
     user_caption = update.message.caption
@@ -237,6 +286,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Get or create the user's batch
     if user_id not in pending_confirmations:
         pending_confirmations[user_id] = {
+            "type": "photo",
             "photos": [],
             "chat_id": update.effective_chat.id,
             "confirm_msg_id": None,
@@ -269,10 +319,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     summary_text = (
         f"📸 <b>{current_count} photo{'s' if current_count != 1 else ''} in your batch.</b>\n\n"
-        "Do you want to post <b>all of them anonymously</b> in the group?\n\n"
-        "• Keep sending more photos to add them to this batch\n"
-        "• Posts will appear from the bot (your username stays hidden)\n"
-        "• Reactions will be enabled on each photo"
+        "Do you want to post <b>all of them anonymously</b>?\n\n"
+        "⚠️ They will be posted from the bot into the target group/channel (no trace to you).\n\n"
+        "• Keep sending more photos to add them\n"
+        "• Each photo gets its own reactions"
     )
 
     chat_id = update.effective_chat.id
@@ -312,7 +362,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 batch["confirm_msg_id"] = sent.message_id
 
         # Short non-intrusive ack (quoted reply to the user's photo)
-        await update.message.reply_text(f"✅ Added • Total: {current_count}", quote=True)
+        await update.message.reply_text(
+            f"✅ Added • Total: {current_count}",
+            quote=True,
+            reply_markup=get_main_keyboard(),
+        )
 
     except Exception as e:
         logger.error(f"Failed to update batch confirmation for user {user_id}: {e}")
@@ -323,96 +377,266 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle Yes / Cancel button presses for single or batch confirmations."""
+    """Handle Yes / Cancel button presses for photo batches or text leaks (email/phone/IG)."""
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer()
 
     batch = pending_confirmations.get(user_id)
     if not batch:
-        await query.edit_message_caption(
-            "❌ This confirmation expired or was already handled.",
-            reply_markup=None,
-        )
-        return
-
-    photos: list = batch.get("photos", [])
-    count = len(photos)
-    chat_id = batch.get("chat_id", user_id)
-
-    if query.data == "confirm_no":
-        pending_confirmations.pop(user_id, None)
         try:
-            await query.edit_message_caption(
-                f"❌ Cancelled. {count} photo{'s' if count != 1 else ''} were not posted.",
+            await query.edit_message_text(
+                "❌ This confirmation expired or was already handled.",
                 reply_markup=None,
             )
         except Exception:
             pass
         return
 
-    if query.data == "confirm_yes":
-        if not photos:
-            pending_confirmations.pop(user_id, None)
-            await query.edit_message_caption("❌ Nothing to post.", reply_markup=None)
-            return
+    leak_type = batch.get("type", "photo")
+    chat_id = batch.get("chat_id", user_id)
 
-        # Strict check with the full batch size
-        limited, limit_msg = can_post_photos(user_id, count)
-        if limited:
-            # We keep the batch so user can cancel or remove some (future) or try later
-            await query.edit_message_caption(limit_msg, reply_markup=None)
-            return
-
-        # Post every photo in the batch (individually so each gets reactions)
-        posted = 0
-        errors = 0
+    if query.data == "confirm_no":
+        pending_confirmations.pop(user_id, None)
         try:
-            for p in photos:
-                try:
-                    await context.bot.send_photo(
-                        chat_id=GROUP_CHAT_ID,
-                        photo=p["file_id"],
-                        caption=p.get("caption"),
-                    )
-                    posted += 1
-                except Exception as photo_err:
-                    errors += 1
-                    logger.error(f"Failed to post one photo from batch for user {user_id}: {photo_err}")
+            if leak_type == "photo":
+                count = len(batch.get("photos", []))
+                await query.edit_message_caption(
+                    f"❌ Cancelled. {count} photo{'s' if count != 1 else ''} were not posted.",
+                    reply_markup=None,
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Cancelled. The {leak_type} was not leaked.",
+                    reply_markup=None,
+                )
+        except Exception:
+            pass
+        return
 
-            record_batch(user_id, posted)
+    if query.data == "confirm_yes":
+        if leak_type == "photo":
+            photos: list = batch.get("photos", [])
+            count = len(photos)
+            if count == 0:
+                pending_confirmations.pop(user_id, None)
+                await query.edit_message_caption("❌ Nothing to post.", reply_markup=None)
+                return
+
+            # Strict rate limit check for the full batch
+            limited, limit_msg = can_post_photos(user_id, count)
+            if limited:
+                await query.edit_message_caption(limit_msg, reply_markup=None)
+                return
+
+            # Post photos individually
+            posted = 0
+            errors = 0
+            try:
+                for p in photos:
+                    try:
+                        await context.bot.send_photo(
+                            chat_id=GROUP_CHAT_ID,
+                            photo=p["file_id"],
+                            caption=p.get("caption"),
+                        )
+                        posted += 1
+                    except Exception as photo_err:
+                        errors += 1
+                        logger.error(f"Failed to post one photo from batch for user {user_id}: {photo_err}")
+
+                record_batch(user_id, posted)
+                pending_confirmations.pop(user_id, None)
+
+                if errors > 0:
+                    success = f"✅ Posted {posted} photo(s) anonymously.\n⚠️ {errors} failed to post."
+                else:
+                    success = f"✅ Posted {posted} photo{'s' if posted != 1 else ''} anonymously!\n\nThank you. Use the buttons below for more leaks."
+
+                try:
+                    await query.edit_message_caption(success, reply_markup=None)
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=success, reply_markup=get_main_keyboard()
+                    )
+
+            except Exception as e:
+                logger.error(f"Failed during batch post for user {user_id}: {e}")
+                pending_confirmations.pop(user_id, None)
+                error_text = (
+                    "❌ Failed to post the batch.\n"
+                    "Make sure the bot is an admin in the target chat with 'Post Messages' permission."
+                )
+                try:
+                    await query.edit_message_caption(error_text, reply_markup=None)
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=error_text, reply_markup=get_main_keyboard()
+                    )
+            return
+
+        # --- Text leaks (email / phone / instagram) ---
+        value = batch.get("value")
+        if not value:
+            pending_confirmations.pop(user_id, None)
+            await query.edit_message_text("❌ No value to leak.", reply_markup=None)
+            return
+
+        # Rate limit check (single item)
+        limited, limit_msg = can_post_photos(user_id, 1)
+        if limited:
+            await query.edit_message_text(limit_msg, reply_markup=None)
+            return
+
+        emoji = {"email": "📧", "phone": "📱", "instagram": "📷"}[leak_type]
+        leak_text = f"{emoji} Leaked {leak_type.capitalize()}:\n{value}"
+
+        try:
+            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=leak_text)
+
+            record_batch(user_id, 1)
             pending_confirmations.pop(user_id, None)
 
-            if errors > 0:
-                success = f"✅ Posted {posted} photo(s) anonymously.\n⚠️ {errors} failed to post."
-            else:
-                success = f"✅ Posted {posted} photo{'s' if posted != 1 else ''} anonymously to the group!\n\nThank you."
-
+            success = "✅ Leaked anonymously!\n\nThank you."
             try:
-                await query.edit_message_caption(success, reply_markup=None)
+                await query.edit_message_text(success, reply_markup=None)
             except Exception:
-                await context.bot.send_message(chat_id=chat_id, text=success)
+                await context.bot.send_message(
+                    chat_id=chat_id, text=success, reply_markup=get_main_keyboard()
+                )
 
         except Exception as e:
-            logger.error(f"Failed during batch post for user {user_id}: {e}")
+            logger.error(f"Failed to post {leak_type} leak for user {user_id}: {e}")
             pending_confirmations.pop(user_id, None)
             error_text = (
-                "❌ Failed to post the batch.\n"
+                "❌ Failed to post the leak.\n"
                 "Make sure the bot is an admin in the target chat with 'Post Messages' permission."
             )
             try:
-                await query.edit_message_caption(error_text, reply_markup=None)
+                await query.edit_message_text(error_text, reply_markup=None)
             except Exception:
                 await context.bot.send_message(chat_id=chat_id, text=error_text)
 
 
-async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch-all for non-photo, non-command messages in private chat."""
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle menu button presses (always visible ReplyKeyboard) and text input for email/phone/IG leaks."""
     if update.effective_chat.type != "private":
         return
+
+    user_id = update.effective_user.id
+    text = (update.message.text or "").strip()
+
+    # --- Menu button actions (persistent keyboard) ---
+    if text == "📸 Leak Photo":
+        await update.message.reply_text(
+            "📸 <b>Photo leak mode</b>\n\n"
+            "Send one or more photos (you can send them individually or as an album).\n"
+            "I'll show a live count and ask for confirmation before posting them anonymously to the group.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    if text in ("📧 Leak Email", "📱 Leak Phone", "📷 Leak Instagram"):
+        if user_id in pending_confirmations:
+            existing_type = pending_confirmations[user_id].get("type")
+            if existing_type == "photo":
+                await update.message.reply_text(
+                    "You have photos waiting for confirmation. Send more photos or tap ❌ Cancel first.",
+                    reply_markup=get_main_keyboard(),
+                )
+            else:
+                await update.message.reply_text(
+                    "You already have a pending leak. Finish it (or tap ❌ Cancel) before starting another.",
+                    reply_markup=get_main_keyboard(),
+                )
+            return
+
+        leak_type = {
+            "📧 Leak Email": "email",
+            "📱 Leak Phone": "phone",
+            "📷 Leak Instagram": "instagram",
+        }[text]
+
+        pending_confirmations[user_id] = {
+            "type": leak_type,
+            "value": None,
+            "chat_id": update.effective_chat.id,
+            "confirm_msg_id": None,
+        }
+
+        prompts = {
+            "email": "Send the email address you want to leak (e.g. name@example.com):",
+            "phone": "Send the phone number you want to leak (with country code if possible):",
+            "instagram": "Send the Instagram username or profile link (e.g. @username or instagram.com/username):",
+        }
+        await update.message.reply_text(
+            f"{prompts[leak_type]}\n\nYou will get a confirmation before it is posted anonymously.",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    if text == "📜 Rules":
+        await update.message.reply_text(RULES_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard())
+        return
+
+    if text == "❌ Cancel":
+        # Reuse cancel logic
+        batch = pending_confirmations.pop(user_id, None)
+        if batch:
+            count = len(batch.get("photos", [])) or (1 if batch.get("value") else 0)
+            msg = f"❌ Pending leak cleared ({count} item{'s' if count != 1 else ''})."
+        else:
+            msg = "No pending leak to cancel."
+        await update.message.reply_text(msg, reply_markup=get_main_keyboard())
+        return
+
+    # --- Text input for pending email/phone/IG leak ---
+    if user_id in pending_confirmations:
+        pending = pending_confirmations[user_id]
+        if pending.get("type") in ("email", "phone", "instagram") and pending.get("value") is None:
+            value = text
+            if not value or len(value) < 2:
+                await update.message.reply_text("Please send a valid value (not empty).")
+                return
+
+            pending["value"] = value
+            leak_type = pending["type"]
+            emoji = {"email": "📧", "phone": "📱", "instagram": "📷"}[leak_type]
+
+            confirm_text = (
+                f"{emoji} <b>Confirm leaking this {leak_type}</b> anonymously?\n\n"
+                f"<code>{value}</code>\n\n"
+                "⚠️ Once confirmed, this will be posted from the bot into the target group/channel. "
+                "No one will know it came from you.\n\n"
+                "Are you sure you want to leak it?"
+            )
+
+            kb = [
+                [
+                    InlineKeyboardButton("✅ Yes, Leak it", callback_data="confirm_yes"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="confirm_no"),
+                ]
+            ]
+            sent = await update.message.reply_text(
+                confirm_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb)
+            )
+            pending["confirm_msg_id"] = sent.message_id
+            return
+
+        # If there's a photo batch pending, remind user
+        if pending.get("type") == "photo":
+            await update.message.reply_text(
+                "You have a photo batch pending. Send more photos or use the buttons on the confirmation message (or ❌ Cancel).",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+
+    # Default / unknown text
     await update.message.reply_text(
-        "📸 Send photos to add them to your anonymous batch.\n"
-        "Commands: /start  /rules  /cancel"
+        "Use the menu buttons at the bottom to leak something, or send a photo directly.\n"
+        "Tap 📜 Rules for more info.",
+        reply_markup=get_main_keyboard(),
     )
 
 
@@ -445,12 +669,12 @@ def main() -> None:
     application.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.PHOTO,
-            handle_other,
+            handle_text,
         )
     )
     application.add_handler(CallbackQueryHandler(handle_confirmation))
 
-    logger.info("RiskIt Bot is running (polling). Send /start in private chat.")
+    logger.info("RiskIt Bot is running (polling). Use the menu buttons or /start.")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
