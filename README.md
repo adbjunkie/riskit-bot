@@ -2,7 +2,7 @@
 
 **Anonymous photo sharing bot for Telegram.**
 
-Users send **one or more photos** privately → confirm the batch with one tap → the bot posts them **anonymously** into your Telegram group or channel (no username visible, posts come from the bot).
+Users send **one or more photos or videos** privately → confirm the batch with one tap → the bot posts them **anonymously** into your Telegram group or channel (no username visible, posts come from the bot).
 
 This is the clean v1 implementation. Perfect base before adding AI enhancement, battles, vault, etc.
 
@@ -12,13 +12,13 @@ This is the clean v1 implementation. Perfect base before adding AI enhancement, 
 
 - Works only in **private chat** with the bot
 - `/start` shows rules + clear instructions
-- Send **one or many photos** (individually or as album) **or** leak email / phone / Instagram
+- Send **one or many photos or videos** (individually or as album/batch) **or** leak email / phone / Instagram
 - Always-visible persistent menu buttons (Leak Photo / Email / Phone / Instagram + Rules + Cancel) — commands still work too
 - Clear welcome message explaining what the bot is and that leaks are posted anonymously to the target private group/channel (with direct invite link shown)
 - Batch confirmation for photos and text leaks always include the exact private destination link so users know precisely where their content goes
 - The bot dynamically shows the real group/channel name + the provided invite link in welcome, confirmations, success, rules, and errors
 - Truly anonymous: bot posts from its own account (no user info or forwarding)
-- Each photo gets individual reactions; rate limiting counts batches and text leaks toward daily total.
+- Each photo/video gets individual reactions; rate limiting counts batches and text leaks toward daily total.
 - Clean, minimal, easy to extend
 
 ---
@@ -139,10 +139,10 @@ docker compose logs -f
 
 1. User sends `/start` (or taps a menu button) → sees explanation of the bot + where leaks go + always-visible buttons
 2. Choose leak type from the persistent bottom menu:
-   - 📸 Leak Photo → send photos (batch supported)
+   - 📸 Leak Photo / 🎥 Leak Video → send photos or videos (batches supported)
    - 📧 Leak Email / 📱 Leak Phone / 📷 Leak Instagram → send the info as text
 3. Bot asks for confirmation (shows the real group name + direct private invite link)
-4. Confirm once → bot posts it anonymously (photos individually, text as labeled messages)
+4. Confirm once → bot posts it anonymously (photos/videos individually, text as labeled messages)
 5. Keyboard stays visible for next leak
 6. Users always see exactly where their leaks (photos + personal info) are going via the provided t.me link
 
@@ -187,11 +187,10 @@ See the table in the "Deploy on Railway" section above.
 
 ## Future Ideas (after this basic version works)
 
-- AI image enhancement / variations before or after posting
+- AI image/video enhancement / variations before or after posting
 - "Risk Score" or community reactions → leaderboard
 - Battles / voting rounds
-- Personal vault of posted images
-- Video support
+- Personal vault of posted images/videos
 - Admin review queue before posting
 - SQLite + proper history
 

@@ -85,9 +85,10 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     """Always-visible persistent menu buttons."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("📸 Leak Photo"), KeyboardButton("📧 Leak Email")],
-            [KeyboardButton("📱 Leak Phone"), KeyboardButton("📷 Leak Instagram")],
-            [KeyboardButton("📜 Rules"), KeyboardButton("❌ Cancel")],
+            [KeyboardButton("📸 Leak Photo"), KeyboardButton("🎥 Leak Video")],
+            [KeyboardButton("📧 Leak Email"), KeyboardButton("📱 Leak Phone")],
+            [KeyboardButton("📷 Leak Instagram"), KeyboardButton("📜 Rules")],
+            [KeyboardButton("❌ Cancel")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -160,8 +161,8 @@ def get_today_str() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
-def can_post_photos(user_id: int, count: int = 1) -> tuple[bool, str | None]:
-    """Check whether the user can post 'count' photos right now.
+def check_rate_limit(user_id: int, count: int = 1) -> tuple[bool, str | None]:
+    """Check whether the user can post 'count' items (photos/videos/etc) right now.
     Returns (is_limited, message_if_limited)
     """
     if count < 1:
@@ -184,14 +185,14 @@ def can_post_photos(user_id: int, count: int = 1) -> tuple[bool, str | None]:
         can_still = DAILY_LIMIT - current
         if can_still <= 0:
             return True, f"📅 Daily limit reached ({DAILY_LIMIT} posts per day). Come back tomorrow!"
-        return True, f"📅 Daily limit: you can only post {can_still} more photo(s) today."
+        return True, f"📅 Daily limit: you can only post {can_still} more today."
 
     return False, None
 
 
 def is_rate_limited(user_id: int):
-    """Legacy single-photo check. Returns (is_limited: bool, message: str|None)"""
-    return can_post_photos(user_id, 1)
+    """Legacy wrapper. Returns (is_limited: bool, message: str|None)"""
+    return check_rate_limit(user_id, 1)
 
 
 def record_batch(user_id: int, count: int = 1) -> None:
@@ -225,14 +226,14 @@ def record_post(user_id: int) -> None:
 RULES_TEXT = """⚠️ <b>RISK IT — Anonymous Leak Bot</b>
 
 <b>What this bot is:</b>
-RiskIt lets you anonymously leak photos + personal info (email, phone, Instagram) to the target group/channel.
+RiskIt lets you anonymously leak photos, videos + personal info (email, phone, Instagram) to the target group/channel.
 
 <b>Where leaks go:</b>
 After you confirm, the bot posts them from its own account into the configured group/channel (the bot will tell you the exact name and link when you start). 
 No one sees your username or that it came from you.
 
 <b>Basic Rules:</b>
-• Only leak <b>your own</b> real info and photos (no stolen / fake / revenge content)
+• Only leak <b>your own</b> real info, photos and videos (no stolen / fake / revenge content)
 • No underage, illegal, or non-consensual material
 • No spam, extreme gore, or hate
 • Once posted, it's visible to everyone in the target chat forever (or until deleted by admins)
@@ -245,6 +246,7 @@ Choose an option from the keyboard to start leaking."""
 POST_INSTRUCTIONS = (
     "Use the buttons at the bottom to start a leak.\n\n"
     "📸 Leak Photo → send one or more photos (batch supported)\n"
+    "🎥 Leak Video → send one or more videos (batch supported)\n"
     "📧 Leak Email / 📱 Leak Phone / 📷 Leak Instagram → send the info as text\n\n"
     "You will always get a clear confirmation (including the exact private group link) before anything is posted anonymously."
 )
@@ -261,7 +263,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome = (
         "🔥 <b>Welcome to RiskIt Bot</b> — the anonymous leak bot.\n\n"
         "This is a private tool for <b>anonymous leaks</b>.\n"
-        "• Photos (with optional captions)\n"
+        "• Photos and videos (with optional captions)\n"
         "• Emails\n"
         "• Phone numbers\n"
         "• Instagram accounts\n\n"
@@ -300,7 +302,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     batch = pending_confirmations.pop(user_id, None)
     if batch:
-        count = len(batch.get("photos", [])) or (1 if batch.get("value") else 0)
+        count = (
+            len(batch.get("photos", []))
+            or len(batch.get("videos", []))
+            or (1 if batch.get("value") else 0)
+        )
         msg = f"❌ Pending leak cleared ({count} item{'s' if count != 1 else ''})."
     else:
         msg = "No pending leak to cancel."
@@ -315,10 +321,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     user_id = update.effective_user.id
 
-    # Prevent mixing text leaks with photos
+    # Prevent mixing different leak types
     if user_id in pending_confirmations:
         existing = pending_confirmations[user_id]
-        if existing.get("type") != "photo":
+        existing_type = existing.get("type")
+        if existing_type == "video":
+            await update.message.reply_text(
+                "You have videos waiting for confirmation. Send more videos or tap ❌ Cancel first.",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+        if existing_type != "photo":
             await update.message.reply_text(
                 "You have a pending text leak (email/phone/IG). Finish it or tap ❌ Cancel first, then send photos.",
                 reply_markup=get_main_keyboard()
@@ -345,7 +358,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     current_count = len(photos_list)
 
     # Soft daily limit check before allowing the addition (prevents huge batches when over limit)
-    limited, limit_msg = can_post_photos(user_id, current_count)
+    limited, limit_msg = check_rate_limit(user_id, current_count)
     if limited and current_count == 1:
         # Only block starting a new batch if already over limit
         photos_list.pop()  # remove the one we just added
@@ -425,6 +438,126 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Receive video(s) in private chat. Collect into a batch and show/update confirmation."""
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Please send videos to me in a private chat only.")
+        return
+
+    user_id = update.effective_user.id
+
+    # Prevent mixing different leak types
+    if user_id in pending_confirmations:
+        existing = pending_confirmations[user_id]
+        existing_type = existing.get("type")
+        if existing_type == "photo":
+            await update.message.reply_text(
+                "You have photos waiting for confirmation. Send more photos or tap ❌ Cancel first.",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+        if existing_type != "video":
+            await update.message.reply_text(
+                "You have a pending text leak (email/phone/IG). Finish it or tap ❌ Cancel first, then send videos.",
+                reply_markup=get_main_keyboard()
+            )
+            return
+        # else it's an existing video batch — allow adding more
+
+    video = update.message.video
+    file_id = video.file_id
+    user_caption = update.message.caption
+
+    # Get or create the user's batch
+    if user_id not in pending_confirmations:
+        pending_confirmations[user_id] = {
+            "type": "video",
+            "videos": [],
+            "chat_id": update.effective_chat.id,
+            "confirm_msg_id": None,
+        }
+
+    batch = pending_confirmations[user_id]
+    videos_list: list = batch["videos"]
+    videos_list.append({"file_id": file_id, "caption": user_caption})
+    current_count = len(videos_list)
+
+    # Soft daily limit check before allowing the addition
+    limited, limit_msg = check_rate_limit(user_id, current_count)
+    if limited and current_count == 1:
+        videos_list.pop()
+        if not videos_list:
+            pending_confirmations.pop(user_id, None)
+        await update.message.reply_text(limit_msg)
+        return
+
+    # Dynamic button with current count
+    keyboard = [
+        [
+            InlineKeyboardButton(f"✅ Post All ({current_count})", callback_data="confirm_yes"),
+            InlineKeyboardButton("❌ Cancel All", callback_data="confirm_no"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    target_name = await get_leak_target_name(context.bot)
+    dest_link = get_leak_destination_link()
+    summary_text = (
+        f"🎥 <b>{current_count} video{'s' if current_count != 1 else ''} in your batch.</b>\n\n"
+        "Do you want to post <b>all of them anonymously</b>?\n\n"
+        f"⚠️ They will be posted from the bot into <b>{target_name}</b> ({dest_link}).\n\n"
+        "• Keep sending more videos to add them\n"
+        "• Each video gets its own reactions"
+    )
+
+    chat_id = update.effective_chat.id
+
+    try:
+        if current_count == 1:
+            # First video: use the video itself as preview + buttons
+            sent = await update.message.reply_video(
+                video=file_id,
+                caption=summary_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+            batch["confirm_msg_id"] = sent.message_id
+        else:
+            # Additional videos: edit the existing confirmation message caption
+            confirm_msg_id = batch.get("confirm_msg_id")
+            if confirm_msg_id:
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=confirm_msg_id,
+                        caption=summary_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                    )
+                except Exception:
+                    sent = await update.message.reply_text(
+                        summary_text, parse_mode="HTML", reply_markup=reply_markup
+                    )
+                    batch["confirm_msg_id"] = sent.message_id
+            else:
+                sent = await update.message.reply_text(
+                    summary_text, parse_mode="HTML", reply_markup=reply_markup
+                )
+                batch["confirm_msg_id"] = sent.message_id
+
+        await update.message.reply_text(
+            f"✅ Added • Total: {current_count}",
+            quote=True,
+            reply_markup=get_main_keyboard(),
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to update video batch confirmation for user {user_id}: {e}")
+        await update.message.reply_text(
+            "⚠️ Had trouble updating the confirmation. You can still send more videos or use /cancel."
+        )
+
+
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Yes / Cancel button presses for photo batches or text leaks (email/phone/IG)."""
     query = update.callback_query
@@ -450,8 +583,16 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             if leak_type == "photo":
                 count = len(batch.get("photos", []))
+                label = "photo" if count == 1 else "photos"
                 await query.edit_message_caption(
-                    f"❌ Cancelled. {count} photo{'s' if count != 1 else ''} were not posted.",
+                    f"❌ Cancelled. {count} {label} were not posted.",
+                    reply_markup=None,
+                )
+            elif leak_type == "video":
+                count = len(batch.get("videos", []))
+                label = "video" if count == 1 else "videos"
+                await query.edit_message_caption(
+                    f"❌ Cancelled. {count} {label} were not posted.",
                     reply_markup=None,
                 )
             else:
@@ -473,7 +614,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return
 
             # Strict rate limit check for the full batch
-            limited, limit_msg = can_post_photos(user_id, count)
+            limited, limit_msg = check_rate_limit(user_id, count)
             if limited:
                 await query.edit_message_caption(limit_msg, reply_markup=None)
                 return
@@ -498,7 +639,8 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 pending_confirmations.pop(user_id, None)
 
                 if errors > 0:
-                    success = f"✅ Posted {posted} photo(s) anonymously.\n⚠️ {errors} failed to post."
+                    label = "photo" if posted == 1 else "photos"
+                    success = f"✅ Posted {posted} {label} anonymously.\n⚠️ {errors} failed to post."
                 else:
                     target_name = await get_leak_target_name(context.bot)
                     dest_link = get_leak_destination_link()
@@ -528,6 +670,71 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                     )
             return
 
+        elif leak_type == "video":
+            videos: list = batch.get("videos", [])
+            count = len(videos)
+            if count == 0:
+                pending_confirmations.pop(user_id, None)
+                await query.edit_message_caption("❌ Nothing to post.", reply_markup=None)
+                return
+
+            # Strict rate limit check for the full batch
+            limited, limit_msg = check_rate_limit(user_id, count)
+            if limited:
+                await query.edit_message_caption(limit_msg, reply_markup=None)
+                return
+
+            # Post videos individually
+            posted = 0
+            errors = 0
+            try:
+                for v in videos:
+                    try:
+                        await context.bot.send_video(
+                            chat_id=GROUP_CHAT_ID,
+                            video=v["file_id"],
+                            caption=v.get("caption"),
+                        )
+                        posted += 1
+                    except Exception as video_err:
+                        errors += 1
+                        logger.error(f"Failed to post one video from batch for user {user_id}: {video_err}")
+
+                record_batch(user_id, posted)
+                pending_confirmations.pop(user_id, None)
+
+                if errors > 0:
+                    label = "video" if posted == 1 else "videos"
+                    success = f"✅ Posted {posted} {label} anonymously.\n⚠️ {errors} failed to post."
+                else:
+                    target_name = await get_leak_target_name(context.bot)
+                    dest_link = get_leak_destination_link()
+                    success = f"✅ Posted {posted} video{'s' if posted != 1 else ''} anonymously to <b>{target_name}</b> ({dest_link})!\n\nThank you. Use the buttons below for more leaks."
+
+                try:
+                    await query.edit_message_caption(success, reply_markup=None)
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=success, reply_markup=get_main_keyboard()
+                    )
+
+            except Exception as e:
+                logger.error(f"Failed during video batch post for user {user_id}: {e}")
+                pending_confirmations.pop(user_id, None)
+                target_name = await get_leak_target_name(context.bot)
+                dest_link = get_leak_destination_link()
+                error_text = (
+                    f"❌ Failed to post the batch to {target_name} ({dest_link}).\n"
+                    "Make sure the bot is an admin in the target chat with 'Post Messages' permission."
+                )
+                try:
+                    await query.edit_message_caption(error_text, reply_markup=None)
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=error_text, reply_markup=get_main_keyboard()
+                    )
+            return
+
         # --- Text leaks (email / phone / instagram) ---
         value = batch.get("value")
         if not value:
@@ -536,7 +743,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         # Rate limit check (single item)
-        limited, limit_msg = can_post_photos(user_id, 1)
+        limited, limit_msg = check_rate_limit(user_id, 1)
         if limited:
             await query.edit_message_text(limit_msg, reply_markup=None)
             return
@@ -594,12 +801,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if text in ("📧 Leak Email", "📱 Leak Phone", "📷 Leak Instagram"):
+    if text == "🎥 Leak Video":
         if user_id in pending_confirmations:
             existing_type = pending_confirmations[user_id].get("type")
             if existing_type == "photo":
                 await update.message.reply_text(
                     "You have photos waiting for confirmation. Send more photos or tap ❌ Cancel first.",
+                    reply_markup=get_main_keyboard(),
+                )
+            elif existing_type == "video":
+                await update.message.reply_text(
+                    "You already have a video batch pending. Send more videos to add to it, or tap ❌ Cancel.",
+                    reply_markup=get_main_keyboard(),
+                )
+            else:
+                await update.message.reply_text(
+                    "You already have a pending leak. Finish it (or tap ❌ Cancel) before starting another.",
+                    reply_markup=get_main_keyboard(),
+                )
+            return
+
+        pending_confirmations[user_id] = {
+            "type": "video",
+            "videos": [],
+            "chat_id": update.effective_chat.id,
+            "confirm_msg_id": None,
+        }
+
+        await update.message.reply_text(
+            "🎥 <b>Video leak mode</b>\n\n"
+            "Send one or more videos.\n"
+            "I'll show a live count and ask for confirmation (with the private group link) before posting them anonymously.\n\n"
+            "Note: videos can be large — send what you intend to leak.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    if text in ("📧 Leak Email", "📱 Leak Phone", "📷 Leak Instagram"):
+        if user_id in pending_confirmations:
+            existing_type = pending_confirmations[user_id].get("type")
+            if existing_type in ("photo", "video"):
+                media = "photos" if existing_type == "photo" else "videos"
+                await update.message.reply_text(
+                    f"You have {media} waiting for confirmation. Send more {media} or tap ❌ Cancel first.",
                     reply_markup=get_main_keyboard(),
                 )
             else:
@@ -641,7 +886,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Reuse cancel logic
         batch = pending_confirmations.pop(user_id, None)
         if batch:
-            count = len(batch.get("photos", [])) or (1 if batch.get("value") else 0)
+            count = (
+                len(batch.get("photos", []))
+                or len(batch.get("videos", []))
+                or (1 if batch.get("value") else 0)
+            )
             msg = f"❌ Pending leak cleared ({count} item{'s' if count != 1 else ''})."
         else:
             msg = "No pending leak to cancel."
@@ -683,17 +932,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pending["confirm_msg_id"] = sent.message_id
             return
 
-        # If there's a photo batch pending, remind user
-        if pending.get("type") == "photo":
+        # If there's a media batch pending, remind user
+        if pending.get("type") in ("photo", "video"):
+            media = "photo" if pending.get("type") == "photo" else "video"
             await update.message.reply_text(
-                "You have a photo batch pending. Send more photos or use the buttons on the confirmation message (or ❌ Cancel).",
+                f"You have a {media} batch pending. Send more {media}s or use the buttons on the confirmation message (or ❌ Cancel).",
                 reply_markup=get_main_keyboard(),
             )
             return
 
     # Default / unknown text
     await update.message.reply_text(
-        "Use the menu buttons at the bottom to leak something, or send a photo directly.\n"
+        "Use the menu buttons at the bottom to leak something, or send photos/videos directly.\n"
         "The bot will always show you the private group link in confirmations.\n"
         "Tap 📜 Rules for more info.",
         reply_markup=get_main_keyboard(),
@@ -727,8 +977,11 @@ def main() -> None:
         MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo)
     )
     application.add_handler(
+        MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video)
+    )
+    application.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.PHOTO,
+            filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.PHOTO & ~filters.VIDEO,
             handle_text,
         )
     )
