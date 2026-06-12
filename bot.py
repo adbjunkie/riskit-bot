@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
@@ -63,6 +64,11 @@ def _get_int_env(name: str, default: int | None = None) -> int:
 TELEGRAM_BOT_TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
 GROUP_CHAT_ID = _get_int_env("GROUP_CHAT_ID")
 
+# Tribute tab: videos sent here go to a DIFFERENT group (TRIBUTE_CHAT_ID).
+# If not set, tribute mode is disabled.
+TRIBUTE_CHAT_ID = _get_int_env("TRIBUTE_CHAT_ID", 0) or None
+TRIBUTE_INVITE_LINK = os.getenv("TRIBUTE_INVITE_LINK", "")
+
 # Public invite link to the private group/channel where all leaks are posted.
 # This is shown to users so they know exactly where their submissions go.
 # Can be overridden via env var TARGET_INVITE_LINK.
@@ -83,20 +89,20 @@ RATE_LIMITS_FILE = os.path.join(DATA_DIR, "rate_limits.json")
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     """Always-visible persistent menu buttons."""
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("📸 Leak Photo"), KeyboardButton("🎥 Leak Video")],
-            [KeyboardButton("📧 Leak Email"), KeyboardButton("📱 Leak Phone")],
-            [KeyboardButton("📷 Leak Instagram"), KeyboardButton("📜 Rules")],
-            [KeyboardButton("❌ Cancel")],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
+    rows = [
+        [KeyboardButton("📸 Leak Photo"), KeyboardButton("🎥 Leak Video")],
+        [KeyboardButton("📧 Leak Email"), KeyboardButton("📱 Leak Phone")],
+        [KeyboardButton("📷 Leak Instagram"), KeyboardButton("📜 Rules")],
+        [KeyboardButton("❌ Cancel")],
+    ]
+    if TRIBUTE_CHAT_ID:
+        rows.insert(2, [KeyboardButton("🎁 Tribute")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
 # Cache for the real name of the destination chat (group or channel)
 TARGET_CHAT_TITLE = None
+TRIBUTE_CHAT_TITLE = None
 
 
 async def get_leak_target_name(bot) -> str:
@@ -120,6 +126,31 @@ async def get_leak_target_name(bot) -> str:
 def get_leak_destination_link() -> str:
     """Returns an HTML link to the private group/channel where leaks are posted."""
     return f'<a href="{TARGET_INVITE_LINK}">this private group</a>'
+
+
+async def get_tribute_target_name(bot) -> str:
+    """Fetch (and cache) the actual title of the tribute chat."""
+    global TRIBUTE_CHAT_TITLE
+    if TRIBUTE_CHAT_TITLE is None:
+        try:
+            chat = await bot.get_chat(TRIBUTE_CHAT_ID)
+            if chat.title:
+                TRIBUTE_CHAT_TITLE = chat.title
+            elif chat.username:
+                TRIBUTE_CHAT_TITLE = f"@{chat.username}"
+            else:
+                TRIBUTE_CHAT_TITLE = f"chat {TRIBUTE_CHAT_ID}"
+        except Exception as e:
+            logger.warning(f"Could not fetch tribute chat title: {e}")
+            TRIBUTE_CHAT_TITLE = "the tribute group"
+    return TRIBUTE_CHAT_TITLE
+
+
+def get_tribute_destination_link() -> str:
+    """Returns an HTML link (or plain text if no link set) to the tribute group."""
+    if TRIBUTE_INVITE_LINK:
+        return f'<a href="{TRIBUTE_INVITE_LINK}">the tribute group</a>'
+    return "the tribute group"
 
 
 # ==================== LOGGING ====================
@@ -558,6 +589,89 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+async def handle_tribute_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Receive a video in tribute mode and queue it for confirmation to the tribute group."""
+    if update.effective_chat.type != "private":
+        return
+
+    user_id = update.effective_user.id
+
+    # Only handle videos when user is in tribute mode; otherwise let handle_video take it
+    if user_id not in pending_confirmations or pending_confirmations[user_id].get("type") != "tribute":
+        return  # fall through to handle_video in group 1
+
+    video = update.message.video
+    file_id = video.file_id
+    user_caption = update.message.caption
+
+    videos_list: list = batch.setdefault("videos", [])
+    videos_list.append({"file_id": file_id, "caption": user_caption})
+    current_count = len(videos_list)
+
+    limited, limit_msg = check_rate_limit(user_id, current_count)
+    if limited and current_count == 1:
+        videos_list.pop()
+        if not videos_list:
+            pending_confirmations.pop(user_id, None)
+        await update.message.reply_text(limit_msg)
+        return
+
+    keyboard = [[
+        InlineKeyboardButton(f"✅ Send Tribute ({current_count})", callback_data="tribute_yes"),
+        InlineKeyboardButton("❌ Cancel", callback_data="tribute_no"),
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    target_name = await get_tribute_target_name(context.bot)
+    dest_link = get_tribute_destination_link()
+    summary_text = (
+        f"🎁 <b>{current_count} tribute video{'s' if current_count != 1 else ''} queued.</b>\n\n"
+        "Send it anonymously?\n\n"
+        f"⚠️ Will be posted from the bot into <b>{target_name}</b> ({dest_link}).\n\n"
+        "• Keep sending more videos to add them"
+    )
+
+    chat_id = update.effective_chat.id
+    try:
+        if current_count == 1:
+            sent = await update.message.reply_video(
+                video=file_id,
+                caption=summary_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+            batch["confirm_msg_id"] = sent.message_id
+        else:
+            confirm_msg_id = batch.get("confirm_msg_id")
+            if confirm_msg_id:
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=confirm_msg_id,
+                        caption=summary_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                    )
+                except Exception:
+                    sent = await update.message.reply_text(summary_text, parse_mode="HTML", reply_markup=reply_markup)
+                    batch["confirm_msg_id"] = sent.message_id
+            else:
+                sent = await update.message.reply_text(summary_text, parse_mode="HTML", reply_markup=reply_markup)
+                batch["confirm_msg_id"] = sent.message_id
+
+        await update.message.reply_text(
+            f"✅ Added • Total: {current_count}",
+            quote=True,
+            reply_markup=get_main_keyboard(),
+        )
+    except Exception as e:
+        logger.error(f"Tribute video handler error for user {user_id}: {e}")
+        await update.message.reply_text("⚠️ Had trouble. Send more or tap ❌ Cancel.")
+
+    # Stop propagation so handle_video in group 1 doesn't also fire
+    raise ApplicationHandlerStop
+
+
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Yes / Cancel button presses for photo batches or text leaks (email/phone/IG)."""
     query = update.callback_query
@@ -577,6 +691,65 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     leak_type = batch.get("type", "photo")
     chat_id = batch.get("chat_id", user_id)
+
+    # ── Tribute confirmation ──────────────────────────────────────────────────
+    if query.data == "tribute_no":
+        pending_confirmations.pop(user_id, None)
+        try:
+            count = len(batch.get("videos", []))
+            label = "video" if count == 1 else "videos"
+            await query.edit_message_caption(f"❌ Cancelled. {count} tribute {label} not sent.", reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    if query.data == "tribute_yes":
+        videos: list = batch.get("videos", [])
+        count = len(videos)
+        if count == 0:
+            pending_confirmations.pop(user_id, None)
+            try:
+                await query.edit_message_caption("❌ Nothing to send.", reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        limited, limit_msg = check_rate_limit(user_id, count)
+        if limited:
+            try:
+                await query.edit_message_caption(limit_msg, reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        posted = 0
+        errors = 0
+        for v in videos:
+            try:
+                await context.bot.send_video(
+                    chat_id=TRIBUTE_CHAT_ID,
+                    video=v["file_id"],
+                    caption=v.get("caption"),
+                )
+                posted += 1
+            except Exception as e:
+                errors += 1
+                logger.error(f"Failed to post tribute video for user {user_id}: {e}")
+
+        record_batch(user_id, posted)
+        pending_confirmations.pop(user_id, None)
+
+        target_name = await get_tribute_target_name(context.bot)
+        dest_link = get_tribute_destination_link()
+        if errors:
+            result = f"✅ Sent {posted} tribute video{'s' if posted != 1 else ''} anonymously.\n⚠️ {errors} failed."
+        else:
+            result = f"✅ Tribute sent anonymously to <b>{target_name}</b> ({dest_link})!\n\nThank you."
+        try:
+            await query.edit_message_caption(result, parse_mode="HTML", reply_markup=None)
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=result, parse_mode="HTML", reply_markup=get_main_keyboard())
+        return
 
     if query.data == "confirm_no":
         pending_confirmations.pop(user_id, None)
@@ -878,6 +1051,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if text == "🎁 Tribute":
+        if not TRIBUTE_CHAT_ID:
+            await update.message.reply_text("Tribute mode is not enabled.", reply_markup=get_main_keyboard())
+            return
+
+        if user_id in pending_confirmations:
+            existing_type = pending_confirmations[user_id].get("type")
+            if existing_type:
+                await update.message.reply_text(
+                    "You have a pending leak. Finish it or tap ❌ Cancel first.",
+                    reply_markup=get_main_keyboard(),
+                )
+            return
+
+        pending_confirmations[user_id] = {
+            "type": "tribute",
+            "videos": [],
+            "chat_id": update.effective_chat.id,
+            "confirm_msg_id": None,
+        }
+
+        target_name = await get_tribute_target_name(context.bot)
+        dest_link = get_tribute_destination_link()
+        await update.message.reply_text(
+            f"🎁 <b>Tribute mode</b>\n\n"
+            f"Send one or more videos to tribute anonymously to <b>{target_name}</b> ({dest_link}).\n\n"
+            "Your identity will not be visible. You'll get a confirmation before anything is sent.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
     if text == "📜 Rules":
         await update.message.reply_text(RULES_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard())
         return
@@ -976,8 +1181,14 @@ def main() -> None:
     application.add_handler(
         MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo)
     )
+    # Tribute handler runs first; it ignores messages unless user is in tribute mode
     application.add_handler(
-        MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video)
+        MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_tribute_video),
+        group=0,
+    )
+    application.add_handler(
+        MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video),
+        group=1,
     )
     application.add_handler(
         MessageHandler(
