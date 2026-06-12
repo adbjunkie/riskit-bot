@@ -356,6 +356,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if user_id in pending_confirmations:
         existing = pending_confirmations[user_id]
         existing_type = existing.get("type")
+        if existing_type == "tribute":
+            # Tribute photo handler (group 0) will intercept this — fall through
+            return
         if existing_type == "video":
             await update.message.reply_text(
                 "You have videos waiting for confirmation. Send more videos or tap ❌ Cancel first.",
@@ -589,6 +592,99 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+async def handle_tribute_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Receive a photo in tribute mode and queue it for confirmation to the tribute group."""
+    if update.effective_chat.type != "private":
+        return
+
+    user_id = update.effective_user.id
+
+    # Only handle photos when user is in tribute mode; otherwise let handle_photo take it
+    if user_id not in pending_confirmations or pending_confirmations[user_id].get("type") != "tribute":
+        return  # fall through to handle_photo in group 1
+
+    batch = pending_confirmations[user_id]
+
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+    user_caption = update.message.caption
+
+    photos_list: list = batch.setdefault("photos", [])
+    photos_list.append({"file_id": file_id, "caption": user_caption})
+    current_count = len(photos_list) + len(batch.get("videos", []))
+    photos_count = len(photos_list)
+
+    limited, limit_msg = check_rate_limit(user_id, current_count)
+    if limited and current_count == 1:
+        photos_list.pop()
+        if not photos_list and not batch.get("videos"):
+            pending_confirmations.pop(user_id, None)
+        await update.message.reply_text(limit_msg)
+        raise ApplicationHandlerStop
+
+    keyboard = [[
+        InlineKeyboardButton(f"✅ Send Tribute ({current_count})", callback_data="tribute_yes"),
+        InlineKeyboardButton("❌ Cancel", callback_data="tribute_no"),
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    target_name = await get_tribute_target_name(context.bot)
+    dest_link = get_tribute_destination_link()
+    videos_count = len(batch.get("videos", []))
+    parts = []
+    if photos_count:
+        parts.append(f"{photos_count} photo{'s' if photos_count != 1 else ''}")
+    if videos_count:
+        parts.append(f"{videos_count} video{'s' if videos_count != 1 else ''}")
+    items_label = " & ".join(parts)
+    summary_text = (
+        f"🎁 <b>{items_label} queued for tribute.</b>\n\n"
+        "Send anonymously?\n\n"
+        f"⚠️ Will be posted from the bot into <b>{target_name}</b> ({dest_link}).\n\n"
+        "• Keep sending more photos or videos to add them"
+    )
+
+    chat_id = update.effective_chat.id
+    try:
+        if current_count == 1:
+            sent = await update.message.reply_photo(
+                photo=file_id,
+                caption=summary_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+            batch["confirm_msg_id"] = sent.message_id
+        else:
+            confirm_msg_id = batch.get("confirm_msg_id")
+            if confirm_msg_id:
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=confirm_msg_id,
+                        caption=summary_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                    )
+                except Exception:
+                    sent = await update.message.reply_text(summary_text, parse_mode="HTML", reply_markup=reply_markup)
+                    batch["confirm_msg_id"] = sent.message_id
+            else:
+                sent = await update.message.reply_text(summary_text, parse_mode="HTML", reply_markup=reply_markup)
+                batch["confirm_msg_id"] = sent.message_id
+
+        await update.message.reply_text(
+            f"✅ Added • Total: {current_count}",
+            quote=True,
+            reply_markup=get_main_keyboard(),
+        )
+    except Exception as e:
+        logger.error(f"Tribute photo handler error for user {user_id}: {e}")
+        await update.message.reply_text("⚠️ Had trouble. Send more or tap ❌ Cancel.")
+
+    # Stop propagation so handle_photo in group 1 doesn't also fire
+    raise ApplicationHandlerStop
+
+
 async def handle_tribute_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Receive a video in tribute mode and queue it for confirmation to the tribute group."""
     if update.effective_chat.type != "private":
@@ -608,12 +704,14 @@ async def handle_tribute_video(update: Update, context: ContextTypes.DEFAULT_TYP
 
     videos_list: list = batch.setdefault("videos", [])
     videos_list.append({"file_id": file_id, "caption": user_caption})
-    current_count = len(videos_list)
+    videos_count = len(videos_list)
+    photos_count = len(batch.get("photos", []))
+    current_count = videos_count + photos_count
 
     limited, limit_msg = check_rate_limit(user_id, current_count)
     if limited and current_count == 1:
         videos_list.pop()
-        if not videos_list:
+        if not videos_list and not batch.get("photos"):
             pending_confirmations.pop(user_id, None)
         await update.message.reply_text(limit_msg)
         return
@@ -626,11 +724,17 @@ async def handle_tribute_video(update: Update, context: ContextTypes.DEFAULT_TYP
 
     target_name = await get_tribute_target_name(context.bot)
     dest_link = get_tribute_destination_link()
+    parts = []
+    if photos_count:
+        parts.append(f"{photos_count} photo{'s' if photos_count != 1 else ''}")
+    if videos_count:
+        parts.append(f"{videos_count} video{'s' if videos_count != 1 else ''}")
+    items_label = " & ".join(parts)
     summary_text = (
-        f"🎁 <b>{current_count} tribute video{'s' if current_count != 1 else ''} queued.</b>\n\n"
-        "Send it anonymously?\n\n"
+        f"🎁 <b>{items_label} queued for tribute.</b>\n\n"
+        "Send anonymously?\n\n"
         f"⚠️ Will be posted from the bot into <b>{target_name}</b> ({dest_link}).\n\n"
-        "• Keep sending more videos to add them"
+        "• Keep sending more photos or videos to add them"
     )
 
     chat_id = update.effective_chat.id
@@ -698,17 +802,25 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
     if query.data == "tribute_no":
         pending_confirmations.pop(user_id, None)
         try:
-            count = len(batch.get("videos", []))
-            label = "video" if count == 1 else "videos"
-            await query.edit_message_caption(f"❌ Cancelled. {count} tribute {label} not sent.", reply_markup=None)
+            photos_count = len(batch.get("photos", []))
+            videos_count = len(batch.get("videos", []))
+            total = photos_count + videos_count
+            parts = []
+            if photos_count:
+                parts.append(f"{photos_count} photo{'s' if photos_count != 1 else ''}")
+            if videos_count:
+                parts.append(f"{videos_count} video{'s' if videos_count != 1 else ''}")
+            items_label = " & ".join(parts) if parts else f"{total} item{'s' if total != 1 else ''}"
+            await query.edit_message_caption(f"❌ Cancelled. {items_label} not sent.", reply_markup=None)
         except Exception:
             pass
         return
 
     if query.data == "tribute_yes":
+        photos: list = batch.get("photos", [])
         videos: list = batch.get("videos", [])
-        count = len(videos)
-        if count == 0:
+        total = len(photos) + len(videos)
+        if total == 0:
             pending_confirmations.pop(user_id, None)
             try:
                 await query.edit_message_caption("❌ Nothing to send.", reply_markup=None)
@@ -716,7 +828,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 pass
             return
 
-        limited, limit_msg = check_rate_limit(user_id, count)
+        limited, limit_msg = check_rate_limit(user_id, total)
         if limited:
             try:
                 await query.edit_message_caption(limit_msg, reply_markup=None)
@@ -726,6 +838,17 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         posted = 0
         errors = 0
+        for p in photos:
+            try:
+                await context.bot.send_photo(
+                    chat_id=TRIBUTE_CHAT_ID,
+                    photo=p["file_id"],
+                    caption=p.get("caption"),
+                )
+                posted += 1
+            except Exception as e:
+                errors += 1
+                logger.error(f"Failed to post tribute photo for user {user_id}: {e}")
         for v in videos:
             try:
                 await context.bot.send_video(
@@ -744,7 +867,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         target_name = await get_tribute_target_name(context.bot)
         dest_link = get_tribute_destination_link()
         if errors:
-            result = f"✅ Sent {posted} tribute video{'s' if posted != 1 else ''} anonymously.\n⚠️ {errors} failed."
+            result = f"✅ Sent {posted} tribute item{'s' if posted != 1 else ''} anonymously.\n⚠️ {errors} failed."
         else:
             result = f"✅ Tribute sent anonymously to <b>{target_name}</b> ({dest_link})!\n\nThank you."
         try:
@@ -1069,6 +1192,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         pending_confirmations[user_id] = {
             "type": "tribute",
+            "photos": [],
             "videos": [],
             "chat_id": update.effective_chat.id,
             "confirm_msg_id": None,
@@ -1078,7 +1202,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         dest_link = get_tribute_destination_link()
         await update.message.reply_text(
             f"🎁 <b>Tribute mode</b>\n\n"
-            f"Send one or more videos to tribute anonymously to <b>{target_name}</b> ({dest_link}).\n\n"
+            f"Send one or more photos or videos to tribute anonymously to <b>{target_name}</b> ({dest_link}).\n\n"
             "Your identity will not be visible. You'll get a confirmation before anything is sent.",
             parse_mode="HTML",
             reply_markup=get_main_keyboard(),
@@ -1180,10 +1304,16 @@ def main() -> None:
     application.add_handler(CommandHandler("rules", rules))
     application.add_handler(CommandHandler("cancel", cancel))
 
+    # Tribute photo handler runs first; it ignores messages unless user is in tribute mode
     application.add_handler(
-        MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo)
+        MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_tribute_photo),
+        group=0,
     )
-    # Tribute handler runs first; it ignores messages unless user is in tribute mode
+    application.add_handler(
+        MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo),
+        group=1,
+    )
+    # Tribute video handler runs first; it ignores messages unless user is in tribute mode
     application.add_handler(
         MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_tribute_video),
         group=0,
