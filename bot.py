@@ -1058,12 +1058,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         if user_id in pending_confirmations:
             existing_type = pending_confirmations[user_id].get("type")
-            if existing_type:
+            if existing_type and existing_type != "tribute":
                 await update.message.reply_text(
                     "You have a pending leak. Finish it or tap ❌ Cancel first.",
                     reply_markup=get_main_keyboard(),
                 )
-            return
+                return
 
         pending_confirmations[user_id] = {
             "type": "tribute",
