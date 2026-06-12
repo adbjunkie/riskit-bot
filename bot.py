@@ -600,6 +600,8 @@ async def handle_tribute_video(update: Update, context: ContextTypes.DEFAULT_TYP
     if user_id not in pending_confirmations or pending_confirmations[user_id].get("type") != "tribute":
         return  # fall through to handle_video in group 1
 
+    batch = pending_confirmations[user_id]
+
     video = update.message.video
     file_id = video.file_id
     user_caption = update.message.caption
